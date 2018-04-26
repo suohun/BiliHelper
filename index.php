@@ -17,8 +17,7 @@ if ($account['username'] == '' || $account['password'] == '') {
 $login = new BiliLogin($account);
 $data = $login->start();
 $cookie = file_get_contents($data['cookie']);
-unlink($data['cookie']);
-
+//unlink($data['cookie']);
 //start
 function start($account, $cookie, $data)
 {
@@ -27,14 +26,21 @@ function start($account, $cookie, $data)
     $api->color = true;
     $api->_accessToken = $data['access_token'];
     $api->_refreshToken = $data['refresh_token'];
+    //要指定投喂过期礼物的直播间id
     $api->roomid = 9522051;
+    //要指定读弹幕消息的直播间id
+    $api->_roomRealId = '';
+    //Server酱接口，有key则推送，为空则不推送
+    $api->_scKey = '';
+
     $api->callback = function () {
         //递归调用
         global $account;
         $login = new BiliLogin($account);
         $data = $login->start();
         $cookie = file_get_contents($data['cookie']);
-        unlink($data['cookie']);
+        //unlink($data['cookie']);
+        //unlink('./tmp/memory.log');
         call_user_func('start', $account, $cookie, $data);
     };
     $api->run();

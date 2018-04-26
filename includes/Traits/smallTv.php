@@ -12,6 +12,8 @@ trait smallTv
 
     //数组 保存小电视抽奖信息
     public $_smallTvLdList = [];
+    //数组 保存小电视信息
+    public $_smallTvList = [];
 
     public function smallTvStart($data)
     {
@@ -25,12 +27,19 @@ trait smallTv
             case '2':
                 $this->log("SmallTv:" . $checkdata['msg'], 'red', 'SOCKET');
                 break;
+            case '444':
+                $this->log("SmallTv:" . $checkdata['msg'], 'red', 'SOCKET');
+                break;
             case '0':
                 if (is_array($checkdata['msg'])) {
                     foreach ($checkdata['msg'] as $value) {
+                        if (!$value) {
+                            continue;
+                        }
                         $this->log("SmallTv: 编号-" . $value, 'cyan', 'SOCKET');
-                        $path = './record/' . $this->_userDataInfo['name'] . '-smallTvRecord.txt';
-                        file_put_contents($path, date("Y-m-d H:i:s") . '|' . 'RoomId:' . $data["real_roomid"] . '|RaffleId:' . $value . "\r\n", FILE_APPEND);
+                        $filename = $this->_userDataInfo['name'] . '-smallTvRecord.txt';
+                        $temp_data = date("Y-m-d H:i:s") . '|' . 'RoomId:' . $data["real_roomid"] . '|RaffleId:' . $value;
+                        $this->writeFileTo('./record/', $filename, $temp_data);
                         //加入查询数组
                         $raffleid = explode("|", $value);
                         $this->_smallTvLdList[] = [
@@ -57,27 +66,40 @@ trait smallTv
             return true;
         }
         if (!empty($this->_smallTvLdList)) {
-            $this->lock['smallTvWin'] += 35;
-            $url = $this->_smallTvFbApi . 'roomid=' . $this->_smallTvLdList[0]['roomid'] . '&raffleId=' . $this->_smallTvLdList[0]['raffleId'];
-            $raw = $this->curl($url);
-            $raw = json_decode($raw, true);
-            if ($raw['data']['status'] == '3') {
-                $this->log("SmallTv: " . $this->_smallTvLdList[0]['raffleId'] . $raw['msg'], 'green', 'SOCKET');
-                return true;
-            } elseif ($raw['data']['status'] == '2') {
-                $this->log("SmallTv: " . $this->_smallTvLdList[0]['raffleId'] . '获得' . $raw['data']['gift_num'] . $raw['data']['gift_name'], 'yellow', 'SOCKET');
-                $path = './record/' . $this->_userDataInfo['name'] . '-smallTvFb.txt';
-                $data = "SmallTv: " . $this->_smallTvLdList[0]['roomid'] . '|' . $this->_smallTvLdList[0]['raffleId'] . '获得' . $raw['data']['gift_num'] . $raw['data']['gift_name'];
-                file_put_contents($path, date("Y-m-d H:i:s") . '|' . $data . "\r\n", FILE_APPEND);
-                unset($this->_smallTvLdList[0]);
-                $this->_smallTvLdList = array_values($this->_smallTvLdList);
-                return true;
-            } else {
-                return true;
+            for ($i = 0; $i < 5; $i++) {
+                if (!isset($this->_smallTvLdList[$i])) {
+                    break;
+                }
+                $url = $this->_smallTvFbApi . 'roomid=' . $this->_smallTvLdList[0]['roomid'] . '&raffleId=' . $this->_smallTvLdList[0]['raffleId'];
+                $raw = $this->curl($url);
+                $de_raw = json_decode($raw, true);
+                switch ($de_raw['data']['status']) {
+                    case 3:
+                        break;
+                    case 2:
+                        $this->log("SmallTv: " . $this->_smallTvLdList[$i]['raffleId'] . '获得' . $de_raw['data']['gift_name'] . 'X' . $de_raw['data']['gift_num'], 'yellow', 'SOCKET');
+                        //写入文件
+                        $filename = $this->_userDataInfo['name'] . '-smallTvFb.txt';
+                        $temp_data = "SmallTv: " . $this->_smallTvLdList[$i]['roomid'] . '|' . $this->_smallTvLdList[0]['raffleId'] . '获得' . $de_raw['data']['gift_name'] . 'X' . $de_raw['data']['gift_num'];
+                        $this->writeFileTo('./record/', $filename, $temp_data);
+                        //推送活动抽奖信息
+                        if ($de_raw['data']['gift_name'] != '辣条' && $de_raw['data']['gift_name'] != '') {
+                            $this->infoSendManager('smallTv', $temp_data);
+                        }
+                        //删除id
+                        unset($this->_smallTvLdList[$i]);
+                        $this->_smallTvLdList = array_values($this->_smallTvLdList);
+
+                        break;
+                    default:
+                        break;
+                }
             }
+
+            $this->lock['smallTvWin'] = time() + 30;
+            return true;
         }
         return true;
-
     }
 
     //检查
@@ -91,6 +113,14 @@ trait smallTv
         $raw = $this->curl($url);
         $raw = json_decode($raw, true);
 
+        //钓鱼检测
+        if (!$this->liveRoomStatus($roomRealid)) {
+            $data = [
+                'code' => '444',
+                'msg' => '该房间存在钓鱼行为!',
+            ];
+            return $data;
+        }
         if (array_key_exists('status', $raw['data'])) {
             switch ($raw['data']['status']) {
                 case '-1':
@@ -122,6 +152,14 @@ trait smallTv
                 'msg' => [],
             ];
             for ($i = 0; $i < count($raw['data']); $i++) {
+                //随机延时抽奖
+                if ($i < 2) {
+                    $this->randFloat();
+                }
+                //抽奖前访问一次直播间
+                if ($i < 1) {
+                    $this->goToRoom($roomid);
+                }
                 $raffleId = $raw['data'][$i]['raffleId'];
                 $data['msg'][$i] = $this->joinActivity($roomRealid, $raffleId);
             }
@@ -132,14 +170,29 @@ trait smallTv
     //加入
     public function joinActivity($roomRealid, $raffleId)
     {
+        if (in_array($raffleId, $this->_smallTvList)) {
+            if (count($this->_smallTvList) > 100) {
+                $this->_smallTvList = null;
+            }
+            return false;
+        } else {
+            $this->_smallTvList[] = $raffleId;
+        }
         $url = $this->_smallTvJoinApi . $roomRealid . '&raffleId=' . $raffleId;
         $raw = $this->curl($url);
-        $raw = json_decode($raw, true);
+        $de_raw = json_decode($raw, true);
+
+        //封禁检查
+        if ($de_raw['code'] == 400 && $de_raw['msg'] == "访问被拒绝"){
+            $this->bannedVisit();
+            return "账号封禁~";
+        }
+
         //打印加入信息
-        var_dump($raw);
-        if ($raw['code'] == 0) {
+        print_r($de_raw);
+        if ($de_raw['code'] == 0) {
             return $raffleId . '|成功，注意查看中奖信息';
-        } elseif ($raw['message'] == '抽奖已失效！') {
+        } elseif ($de_raw['message'] == '抽奖已失效！') {
             return $raffleId . '|失效';
         } else {
             return $raffleId . '|失败';

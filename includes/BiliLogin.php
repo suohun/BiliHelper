@@ -4,7 +4,7 @@
  *  Author: Mudew
  *  Version: 0.0.1
  */
-require 'Ocr.php';
+header("Content-Type:text/html; charset=utf-8");
 
 class BiliLogin
 {
@@ -33,19 +33,23 @@ class BiliLogin
 
     public function start()
     {
-        $this->log('加载账号密码', 'lightgray', 'BiliLogin');
+        $this->log('加载账号密码', 'lightgray', 'BILILOGIN');
 
         if (empty($this->_user) || empty($this->_pass)) {
-            $this->log('配置为空,请检查配置', 'red', 'BiliLogin');
+            $this->log('配置为空,请检查配置', 'red', 'BILILOGIN');
             die;
         }
-        $this->log('加载成功,获取加密信息', 'green', 'BiliLogin');
+        $this->log('加载成功,获取加密信息', 'green', 'BILILOGIN');
         $this->_keyHash = $this->getKey();
 
         $pass = $this->_keyHash['hash'] . $this->_pass;
         $newpass = $this->rsaEncrypt($pass);
 
-        $url = $this->_baseUrl . 'api/oauth2/login';
+        /**
+         *  OldApi : 'api/oauth2/login'
+         *  更换接口
+         */
+        $url = $this->_baseUrl . 'api/v2/oauth2/login';
         $data = [
             'appkey' => $this->_appKey,
             'username' => $this->_user,
@@ -57,72 +61,119 @@ class BiliLogin
         $loginInfo = json_decode($res, true);
 
         if (array_key_exists('message', $loginInfo)) {
-            if ($loginInfo['message'] == 'CAPTCHA is not match') {
-                //code = -105
-                $loginInfo = null;
-                $loginInfo = $this->captchaLogin($url, $data);
+            switch ($loginInfo['code']){
+                case -629:
+                    //账号或者密码错误
+                    $this->log($loginInfo['message'], 'red', 'BILILOGIN');
+                    exit("检查账号密码是否正确!");
+                    break;
 
-                $cookies = $this->getCookie($loginInfo);
-                $this->log('获取Cookie成功', 'green', 'BiliLogin');
+                case -105:
+                    /**
+                     *  TODO 验证码登陆问题
+                     *  $loginInfo['message'] = 'CAPTCHA is not match'
+                     */
+                    unset($loginInfo);
+                    $loginInfo = $this->captchaLogin($url, $data);
+                    break;
 
-                $tempfile = './tmp/' . $this->getRandCode();
-
-                foreach ($cookies[1] as $cookie) {
-                    file_put_contents($tempfile, $cookie . ';', FILE_APPEND);
-                }
-                return $tempfile;
+                default:
+                    $this->log($loginInfo['message'], 'red', 'BILILOGIN');
+                    break;
             }
-            $this->log($loginInfo['message'], 'red', 'BiliLogin');
-            die;
         }
 
-        $cookies = $this->getCookie($loginInfo);
-        $this->log('获取Cookie成功', 'green', 'BiliLogin');
-
-        $tempfile = $this->getRandCode();
-
-        foreach ($cookies[1] as $cookie) {
-            file_put_contents($tempfile, $cookie . ';', FILE_APPEND);
-        }
-        //返回cookie access_token refresh_token
+        $this->log('获取Cookie成功', 'green', 'BILILOGIN');
+        $cookie_file = $this->saveCookie($loginInfo);
+        /**
+         * return
+         * path $cookie_file
+         * string $access_token
+         * string $refresh_token
+         */
         return [
-            'cookie' => $tempfile,
-            'access_token' => $loginInfo['data']['access_token'],
-            'refresh_token' => $loginInfo['data']['refresh_token'],
+            'cookie' => $cookie_file,
+            'access_token' => $loginInfo['data']['token_info']['access_token'],
+            'refresh_token' => $loginInfo['data']['token_info']['refresh_token'],
         ];
     }
 
+    //保存cookie
+    public function saveCookie($login_nfo)
+    {
+        //临时保存cookie
+        $temp_cookie = '';
+        $cookies = $login_nfo['data']['cookie_info']['cookies'];
+        foreach ($cookies as $cookie) {
+            $temp_cookie .= $cookie['name'] . '=' . $cookie['value'] . ';';
+        }
+
+        $filename = $this->getUserInfo($temp_cookie) . '.cookies';
+
+        //返回 用户名.cookies 路径
+        $cookie_file = './user/' . $filename;
+        if (is_file($cookie_file)) {
+            unlink($cookie_file);
+        }
+        $this->writeFileTo('./user/', $filename, $temp_cookie);
+
+        return $cookie_file;
+    }
+
+    //写入文件
+    public function writeFileTo($path, $filename, $data)
+    {
+        if (!file_exists($path)) {
+            mkdir($path);
+            chmod($path, 0777);
+        }
+        $completePath = $path . $filename;
+        file_put_contents($completePath, $data . PHP_EOL, FILE_APPEND);
+        return true;
+    }
+
+    //查用户名
+    public function getUserInfo($cookie)
+    {
+        $url = 'http://api.live.bilibili.com/User/getUserInfo?ts=' . time();
+        $raw = $this->curl($url, null, false, $cookie);
+        $de_raw = json_decode($raw, true);
+        //返回用户名
+        return $de_raw['data']['uname'];
+    }
+
+    //验证码登陆
     public function captchaLogin($url, $data)
     {
         $this->_flag += 1;
         if (array_key_exists('sign', $data)) {
             unset($data['sign']);
         }
-        $ocr = new Ocr();
-        $tmp = $this->saveCaptcha();
-        if ($tmp['code'] == '200') {
-            $tmpocr = $ocr->foreUpload($tmp['captcha']);
-            $tmpocr = str_replace('\n', '', $tmpocr);
-            $tmpocr = json_decode($tmpocr, true);
+        $captcha_raw = $this->saveCaptcha();
+        $ocr_captcha_url = "http://101.236.6.31:8080/code";
+        $ocr_captcha_raw = base64_encode($captcha_raw['captcha']);
+        $ocr_data = [
+            'image' => $ocr_captcha_raw,
+        ];
+        $ocr_raw = $this->curl($ocr_captcha_url, $ocr_data);
 
-            if ($tmpocr['success'] == 1) {
-                $data['captcha'] = $tmpocr['result'][0]['content'];
-                ksort($data);
-                $data['sign'] = $this->createSign($data);
-                $res = $this->curl($url, $data);
-                $loginInfo = json_decode($res, true);
-                if ($loginInfo['code'] == '-105' || $loginInfo['code'] == '-3') {
-                    $this->log('验证码识别错误，第' . $this->_flag . '次', 'red', 'BiliLogin');
-                    unlink('./tmp/' . $tmp['captcha']);
-                    $this->captchaLogin($url, $data);
-                } else {
-                    $this->log('验证码识别成功，第' . $this->_flag . '次', 'green', 'BiliLogin');
-                    return $loginInfo;
-                }
+        $this->log('验证码识别: ' . $ocr_raw, 'green', 'BiliLBILILOGINogin');
 
-            }
+        $data['captcha'] = $ocr_raw;
+        ksort($data);
+        $data['sign'] = $this->createSign($data);
+        $cookie = $this->trimAll($captcha_raw['cookie']);
+        $raw = $this->curl($url, $data, false, $cookie);
+
+        $loginInfo = json_decode($raw, true);
+
+        if ($loginInfo['code'] == -105) {
+            $this->log('验证码识别: 错误，重试!', 'red', 'BILILOGIN');
+            exit();
         }
+        $this->log('验证码识别: 成功,开始登陆!', 'green', 'BILILOGIN');
 
+        return $loginInfo;
     }
 
     public function saveCaptcha()
@@ -131,21 +182,14 @@ class BiliLogin
         $url = $this->_baseUrl . 'captcha';
         $cookie = 'sid=' . $this->getRandCode($max);
         $res = $this->curl($url, null, false, $cookie);
-        $captcha = './tmp/' . $this->getRandCode($max) . '.jpg';
-        $flag = file_put_contents($captcha, $res);
 
-        //if (!$flag)
-        //    $this->log('生成验证码失败', 'red', 'BiliLogin');
-        //TODO
-
-        $this->log('生成验证码成功', 'green', 'BiliLogin');
+        $this->log('验证码识别: 生成验证码中...', 'green', 'BILILOGIN');
 
         return [
             'code' => '200',
-            'captcha' => $captcha,
+            'captcha' => $res,
             'cookie' => $cookie,
         ];
-
     }
 
     private function getCookie($loginInfo)
@@ -158,14 +202,14 @@ class BiliLogin
             'ts' => time(),
         ];
 
-        $data['access_key'] = $loginInfo['data']['access_token'];
+        $data['access_key'] = $loginInfo['data']['token_info']['access_token'];
         ksort($data);
         $data['sign'] = $this->createSign($data);
         $url = 'http://passport.bilibili.com/api/login/sso?' . http_build_query($data);
         $res = $this->curl($url, null, true);
         preg_match_all('/Set-Cookie: (.*);/iU', $res, $cookie);
         if (empty($cookie)) {
-            $this->log('Cookie获取失败', 'red', 'BiliLogin');
+            $this->log('Cookie获取失败', 'red', 'BILILOGIN');
         }
         return $cookie;
 
@@ -204,7 +248,7 @@ class BiliLogin
         $public_key = str_replace('\n', '', $tmp['data']['key']);
         //Public key & Hash
         if (!array_key_exists('data', $tmp)) {
-            $this->log('加密信息获取失败', 'red', 'BiliLogin');
+            $this->log('加密信息获取失败', 'red', 'BILILOGIN');
             die;
         }
         return [
@@ -213,6 +257,14 @@ class BiliLogin
         ];
     }
 
+    //删除cookie的空格和回车
+    public function trimAll($str)
+    {
+        $rule = array("\r\n", " ", "　", "\t", "\n", "\r");
+        return str_replace($rule, '', $str);
+    }
+
+    //rsa加密
     private function rsaEncrypt($data)
     {
         $public_key = openssl_pkey_get_public($this->_keyHash['key']);

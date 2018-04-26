@@ -4,6 +4,7 @@
  *  Author: METO
  *  Version: 0.6.2
  */
+header("Content-Type:text/html; charset=utf-8");
 
 require "Traits/customConfig.php";
 require "Traits/smallTv.php";
@@ -13,6 +14,8 @@ require "Traits/rhythmStorm.php";
 require "Traits/userHelper.php";
 require "Traits/otherGift.php";
 require "Traits/activityLottery.php";
+require "Traits/groupSign.php";
+require "Traits/noticeManager.php";
 
 class Bilibili
 {
@@ -24,11 +27,13 @@ class Bilibili
     use userHelper;
     use otherGift;
     use activityLottery;
+    use groupSign;
+    use noticeManager;
 
     // 主播房间 id
     public $roomid = '3746256';
     // UA
-    public $useragent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.108 Safari/537.36';
+    public $useragent = 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36';
     // 调试信息开关
     public $debug = false;
     // 调试信息上色
@@ -78,8 +83,6 @@ class Bilibili
             'sheart' => $this->start,
             //中奖查询
             'wincheck' => $this->start,
-            //扭蛋币
-            'eggMoney' => $this->start,
             //瓜子换硬币
             'silver2coin' => $this->start,
             //客户端心跳
@@ -94,12 +97,20 @@ class Bilibili
             'activeWin' => $this->start,
             //私人发送弹幕
             'privateSendMsg' => $this->start,
-
+            //应援团签到
+            'groupSign' => $this->start,
+            //实物抽奖
+            'drawLottery' => $this->start,
+            //刷新cookie 周期20小时
+            'refreshCookie' => $this->start + 240 * 60 * 60,
+            //刷新token 周期100小时
+            'refreshToken' => $this->start + 480 * 60 * 60,
         );
     }
 
     public function init()
     {
+        $this->cookie = $this->trimAll($this->cookie);
         $api = $this->prefix . 'room/v1/Room/room_init?id=' . $this->roomid;
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
@@ -122,6 +133,7 @@ class Bilibili
         }
 
         $this->uid = $data['data']['info']['uid'];
+        $this->_userDataInfo['name'] = $data['data']['info']['uname'];
 
         preg_match('/bili_jct=(.{32})/', $this->cookie, $token);
         $this->token = isset($token[1]) ? $token[1] : '';
@@ -142,18 +154,17 @@ class Bilibili
                 if (!$this->heart()) break;
                 if (!$this->silver()) break;
                 if (!$this->giftheart()) break;
-                if (!$this->eggMoney()) break;
-                if (!$this->customerAction()) break;
                 if (!$this->smallTvWin()) break;
                 if (!$this->activeWin()) break;
                 if (!$this->dailyTask()) break;
                 if (!$this->dailyBag()) break;
-                foreach ($this->_biliTaskskip as $key => $value)
-                {
+                foreach ($this->_biliTaskskip as $key => $value) {
                     if ($value)
                         if (!$this->$key()) break;
                 }
-
+                //刷新信息
+                if (!$this->refreshInfo()) break;
+                if (!$this->customerAction()) break;
                 sleep(1);
             }
             sleep(10);
@@ -178,23 +189,26 @@ class Bilibili
 
         // 已经签到
         if ($data['code'] == -500) {
-            $this->log($data['msg'], 'green', '签到');
-            $this->lock['sign'] += 24 * 60 * 60;
+            $this->log($data['msg'], 'green', 'SIGN');
+            $this->lock['sign'] = time() + 24 * 60 * 60;
             return true;
         }
         // 签到失败
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '签到');
+            $this->log($data['msg'], 'bg_red', 'SIGN');
             return false;
         }
         // 签到成功
-        $this->log($data['msg'], 'blue', '签到');
+        $this->log($data['msg'], 'blue', 'SIGN');
+
+        //推送签到结果信息
+        $this->infoSendManager('todaySign', $data['msg']);
 
         $api = $this->prefix . 'giftBag/sendDaily?_=' . round(microtime(true) * 1000);
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '签到');
+            $this->log($data['msg'], 'bg_red', 'SIGN');
             return false;
         }
 
@@ -202,7 +216,7 @@ class Bilibili
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
 
-        $this->log("获得 " . $data['data']['text'] . $data['data']['specialText'], 'green', '签到');
+        $this->log("获得 " . $data['data']['text'] . $data['data']['specialText'], 'green', 'SIGN');
         return true;
     }
 
@@ -217,10 +231,10 @@ class Bilibili
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '心跳');
+            $this->log($data['msg'], 'bg_red', 'HEART');
             return false;
         }
-        $this->lock['heart'] += 5 * 60;
+        $this->lock['heart'] = time() + 5 * 60;
 
         $api = $this->prefix . 'User/getUserInfo?ts=' . round(microtime(true) * 1000);
         $raw = $this->curl($api);
@@ -241,25 +255,25 @@ class Bilibili
         $a = $data['data']['user_intimacy'];
         $b = $data['data']['user_next_intimacy'];
         $per = round($a / $b * 100, 3);
-        $this->log('PCHeart: OK!', 'magenta', '心跳');
-        $this->log("level:$level exp:$a/$b ($per%)", 'magenta', '心跳');
+        $this->log('PCHeart: OK!', 'magenta', 'HEART');
+        $this->log("level:$level exp:$a/$b ($per%)", 'magenta', 'HEART');
         return true;
     }
 
-    private function giftsend()
+    public function giftsend()
     {
         if (time() < $this->lock['giftsend'] || empty($this->token)) {
             return true;
         }
-        $this->lock['giftsend'] += 3600;
+        $this->lock['giftsend'] = time() + 3600;
 
-        $this->log('开始翻动礼物', 'green', '投喂');
+        $this->log('开始翻动礼物', 'green', 'FEED');
         $api = $this->prefix . 'gift/v2/gift/bag_list';
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
 
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '投喂');
+            $this->log($data['msg'], 'bg_red', 'FEED');
             return false;
         }
 
@@ -283,14 +297,30 @@ class Bilibili
                 'csrf_token' => $this->token
             );
 
+            //TODO  有待优化
+            $length = mb_strlen(http_build_query($payload));
+            $headers = array(
+                'Host: api.live.bilibili.com',
+                'Connection: keep-alive',
+                'Content-Length: ' . $length,
+                'Accept: application/json, text/javascript, */*; q=0.01',
+                'Origin: http://live.bilibili.com',
+                'User-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/55.0.2883.87 Safari/537.36',
+                'Content-Type: application/x-www-form-urlencoded; charset=UTF-8',
+                'Referer: http://live.bilibili.com/',
+                'Accept-Encoding: gzip, deflate, br',
+                'Accept-Language: zh-CN,zh;q=0.8',
+                'Cookie: ' . $this->cookie,
+            );
+
             $api = $this->prefix . 'gift/v2/live/bag_send';
-            $res = $this->curl($api, $payload);
+            $res = $this->curl($api, $payload, true, $headers);
             $res = json_decode($res, true);
 
             if ($res['code']) {
-                $this->log("{$res['msg']}", 'red', '投喂');
+                $this->log("{$res['msg']}", 'red', 'FEED');
             } else {
-                $this->log("成功向 https://live.bilibili.com/{$this->roomid} 投喂了 {$vo['gift_num']} 个 {$vo['gift_name']}", 'green', '投喂');
+                $this->log("成功向 https://live.bilibili.com/{$this->roomid} 投喂了 {$vo['gift_num']} 个 {$vo['gift_name']}", 'green', 'FEED');
             }
         }
         return true;
@@ -301,31 +331,31 @@ class Bilibili
         if (time() < $this->lock['giftheart']) {
             return true;
         }
-        $this->lock['giftheart'] += 5 * 60;
+        $this->lock['giftheart'] = time() + 5 * 60;
 
         $api = $this->prefix . 'gift/v2/live/heart_gift_receive?roomid=' . $this->roomid;
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
 
         if ($data['code'] == -403) {
-            $this->log($data['msg'], 'magenta', '收礼');
-            $this->lock['giftheart'] += 60 * 60;
+            $this->log($data['msg'], 'magenta', 'GIFTS');
+            $this->lock['giftheart'] = time() + 60 * 60;
             $this->curl($this->prefix . 'eventRoom/index?ruid=17561885');
             return true;
         }
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '收礼');
+            $this->log($data['msg'], 'bg_red', 'GIFTS');
             return false;
         }
 
         if ($data['data']['heart_status'] == 0) {
-            $this->log('没有礼物可以领了呢', 'magenta', '收礼');
-            $this->lock['giftheart'] += 60 * 60;
+            $this->log('没有礼物可以领了呢', 'magenta', 'GIFTS');
+            $this->lock['giftheart'] = time() + 60 * 60;
         }
 
         if (isset($data['data']['gift_list'])) {
             foreach ($data['data']['gift_list'] as $vo) {
-                $this->log("{$data['msg']}，礼物 {$vo['gift_name']} ({$vo['day_num']}/{$vo['day_limit']})", 'magenta', '收礼');
+                $this->log("{$data['msg']}，礼物 {$vo['gift_name']} ({$vo['day_num']}/{$vo['day_limit']})", 'magenta', 'GIFTS');
             }
         }
         return true;
@@ -344,16 +374,16 @@ class Bilibili
             $data = json_decode($raw, true);
             // 今日已经领完
             if ($data['code'] == -10017) {
-                $this->lock['silver'] += 60 * 60;
-                $this->log($data['msg'], 'blue', '宝箱');
+                $this->lock['silver'] = time() + 60 * 60;
+                $this->log($data['msg'], 'blue', 'SBOX');
                 return true;
             }
             // 领取失败
             if ($data['code'] != 0) {
-                $this->log($data['msg'], 'bg_red', '签到');
+                $this->log($data['msg'], 'bg_red', 'SBOX');
                 return false;
             }
-            $this->log("领取宝箱，内含 {$data['data']['silver']} 瓜子，需要 {$data['data']['minute']} 分钟开启", 'cyan', '宝箱');
+            $this->log("领取宝箱，内含 {$data['data']['silver']} 瓜子，需要 {$data['data']['minute']} 分钟开启", 'cyan', 'SBOX');
 
             $this->temp['task'] = array(
                 'start' => $data['data']['time_start'],
@@ -363,26 +393,42 @@ class Bilibili
             $this->log(sprintf(
                 "等待 %s 领取",
                 date('H:i:s', $this->lock['silver'])
-            ), 'blue', '宝箱');
+            ), 'blue', 'SBOX');
 
             return true;
         }
+        /*
+                $captcha = $this->captcha();
+                $api = $this->prefix . sprintf(
+                        'lottery/v1/SilverBox/getAward?time_start=%s&end_time=%s&captcha=%s',
+                        $this->temp['task']['start'],
+                        $this->temp['task']['end'],
+                        $captcha
+                    );
+        */
+        $data = [
+            'access_key' => $this->_accessToken,
+            'actionKey' => 'appkey',
+            'appkey' => $this->_appKey,
+            'build' => '414000',
+            'device' => 'android',
+            'mobi_app' => 'android',
+            'platform' => 'android',
+            'time_end' => $this->temp['task']['end'],
+            'time_start' => $this->temp['task']['start'],
+            'ts' => time(),
+        ];
+        ksort($data);
+        $data['sign'] = $this->createSign($data);
 
-        $captcha = $this->captcha();
-
-        $api = $this->prefix . sprintf(
-                'lottery/v1/SilverBox/getAward?time_start=%s&end_time=%s&captcha=%s',
-                $this->temp['task']['start'],
-                $this->temp['task']['end'],
-                $captcha
-            );
+        $api = 'https://api.live.bilibili.com/mobile/freeSilverAward?' . http_build_query($data);
         $raw = $this->curl($api);
         $data = json_decode($raw, true);
 
         if ($data['code'] != 0) {
-            $this->log($data['msg'], 'bg_red', '宝箱');
+            $this->log($data['msg'], 'bg_red', 'SBOX');
         } else {
-            $this->log("领取成功，silver: {$data['data']['silver']}(+{$data['data']['awardSilver']})", 'cyan', '宝箱');
+            $this->log("领取成功，silver: {$data['data']['silver']}(+{$data['data']['awardSilver']})", 'cyan', 'SBOX');
         }
 
         unset($this->temp['task']);
@@ -420,7 +466,7 @@ class Bilibili
                     break;
                 case 'unkown':
                     //返回新未知类型
-                    $this->log('CMD: 暂定采集新的数据类型' . $data['raw'], 'yellow', 'SOCKET');
+                    $this->log('CMD: 数据包不全或有新的类型' . $data['raw'], 'green', 'SOCKET');
                     break;
                 default:
                     //不知道什么
@@ -433,7 +479,7 @@ class Bilibili
 
     public function captcha()
     {
-        $this->log("开始做幼儿算术", "blue", '宝箱');
+        $this->log("开始做幼儿算术", "blue", 'SBOX');
 
         $api = $this->prefix . 'lottery/v1/SilverBox/getCaptcha?ts=' . time();
         $raw = $this->curl($api);
@@ -507,7 +553,7 @@ class Bilibili
         }
 
         $ans = eval("return $result;");
-        $this->log("好耶！ $result = $ans", 'blue', '宝箱');
+        $this->log("好耶！ $result = $ans", 'blue', 'SBOX');
         return $ans;
     }
 
@@ -538,13 +584,13 @@ class Bilibili
         echo sprintf($colors[$color], $date . $type . $message) . PHP_EOL;
     }
 
-    public function curl($url, $data = null, $log = true, $headers = null, $referer = null)
+    public function curl($url, $data = null, $log = true, $headers = null, $referer = null, $useragent = false, $header = false)
     {
         if ($this->debug) {
             $this->log('>>> ' . $url, 'lightgray');
         }
         $curl = curl_init();
-        curl_setopt($curl, CURLOPT_HEADER, 0);
+        curl_setopt($curl, CURLOPT_HEADER, $header);
         curl_setopt($curl, CURLOPT_TIMEOUT, 20);
         curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
         curl_setopt($curl, CURLOPT_IPRESOLVE, 1);
@@ -562,12 +608,14 @@ class Bilibili
         }
 
         curl_setopt($curl, CURLOPT_COOKIE, $this->cookie);
-        curl_setopt($curl, CURLOPT_USERAGENT, $this->useragent);
-        if ($this->_issetProxy) {
-            curl_setopt($curl, CURLOPT_PROXY, $this->_setProxy['ip']);
+        if ($useragent) {
+            curl_setopt($curl, CURLOPT_USERAGENT, $this->useragent);
         }
-        //代理服务器地址
-        curl_setopt($curl, CURLOPT_PROXYPORT, $this->_setProxy['port']); //代理服务器端口
+        if ($this->_issetProxy) {
+            //代理服务器地址
+            curl_setopt($curl, CURLOPT_PROXY, $this->_setProxy['ip']);
+            curl_setopt($curl, CURLOPT_PROXYPORT, $this->_setProxy['port']); //代理服务器端口
+        }
         if (!empty($data)) {
             if (is_array($data)) {
                 $data = http_build_query($data);
@@ -583,10 +631,53 @@ class Bilibili
         return $result;
     }
 
+    //appCurl
+    public function appCurl($url, $data)
+    {
+        $newdata = http_build_query($data);
+        $length = mb_strlen($newdata);
+
+        $headers = [
+            'Display-ID: 6580464-1522208142',
+            'Buvid: 53CA3838-C28F-4E42-9B97-886D3CF7AD4B36100infoc',
+            'User-Agent: Mozilla/5.0 BiliDroid/5.22.1 (bbcallen@gmail.com)',
+            'Device-ID: Pw83Bj8LbgppUTJTL1Mv',
+            'Content-Type: application/x-www-form-urlencoded',
+            'Content-Length: ' . $length,
+            'Host: api.live.bilibili.com',
+            'Connection: Keep-Alive',
+            'Accept-Encoding: gzip',
+            'Cookie: ' . $this->cookie,
+        ];
+
+        $curl = curl_init();
+        curl_setopt($curl, CURLOPT_URL, $url);
+        curl_setopt($curl, CURLOPT_HEADER, 0);
+        curl_setopt($curl, CURLOPT_TIMEOUT, 20);
+        curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
+        curl_setopt($curl, CURLOPT_IPRESOLVE, 1);
+        curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+        curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 10);
+
+        if ($this->_issetProxy) {
+            //代理服务器地址
+            curl_setopt($curl, CURLOPT_PROXY, $this->_setProxy['ip']);
+            curl_setopt($curl, CURLOPT_PROXYPORT, $this->_setProxy['port']); //代理服务器端口
+        }
+        curl_setopt($curl, CURLOPT_POST, 1);
+        curl_setopt($curl, CURLOPT_POSTFIELDS, $newdata);
+
+        $result = curl_exec($curl);
+        curl_close($curl);
+        return $result;
+    }
+
     // 调试函数
     public function pr($var)
     {
         print_r($var);
-        exit;
+        exit();
     }
 }
